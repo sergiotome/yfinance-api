@@ -109,11 +109,7 @@ def get_history(
         for dt, row in hist.iterrows():
             records.append({
                 "date": str(dt.date()),
-                "open": _safe_float(row.get("Open")),
-                "high": _safe_float(row.get("High")),
-                "low": _safe_float(row.get("Low")),
-                "close": _safe_float(row.get("Close")),
-                "volume": _safe_int(row.get("Volume")),
+                "close": _safe_float(row.get("Close"))
             })
 
         return {"symbol": ticker, "history": records}
