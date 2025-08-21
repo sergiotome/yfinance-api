@@ -83,7 +83,7 @@ def get_quote(symbols: str = Query(..., description="Comma-separated tickers, e.
         except Exception as e:
             results.append({"symbol": ticker, "error": str(e)})
 
-    return {"quotes": results}
+    return results
 
 @app.get("/history")
 def get_history(
