@@ -112,6 +112,6 @@ def get_history(
                 "close": _safe_float(row.get("Close"))
             })
 
-        return {"symbol": ticker, "history": records}
+        return records
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e), "symbol": ticker})
