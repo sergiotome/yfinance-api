@@ -29,11 +29,14 @@ This is a **ready-to-deploy** microservice that exposes two endpoints backed by 
 5. **Run the server**:
    ```bash
    uvicorn app:app --reload
+
+   uvicorn app:app --reload --port 8081 --log-level debug
    ```
 
 6. **Test in your browser**:
    - Open http://127.0.0.1:8000  
-   - Example: http://127.0.0.1:8000/quote?symbols=IBE.MC,0P0000OQPB.IR  
+   - Example: http://127.0.0.1:8000/quote?symbols=IBE.MC,0P0000OQPB.IR
+     - Example: http://127.0.0.1:8081/quote?symbols=ACN,0P0001CLDM.F@@IE00BYX5MX67@@FT,XAIX.MI,ERDV.F@@0P0000VHO6@@MS,0P0001CLDK.F@@IE00BYX5NX33@@FT,AMZN
    - Example: http://127.0.0.1:8000/history?ticker=IBE.MC&start=2010-01-01
 
 7. **API docs**:
