@@ -105,6 +105,24 @@ def _get_yf_info(ticker: str) -> Dict[str, Any]:
 
     return data
 
+def _get_yf_history(ticker: str):
+    if (len(ticker)==12):
+        yfTicker = _get_ms_code(ticker, "performanceID") + ".F"
+    else:
+        yfTicker = ticker
+
+    t = yf.Ticker(yfTicker)
+    hist = t.history(start="2000-01-01", end=datetime.today().strftime('%Y-%m-%d'), interval="1d", auto_adjust=False)
+
+    records = []
+    for dt, row in hist.iterrows():
+        records.append({
+            "date": str(dt.date()),
+            "close": _safe_float(row.get("Close"))
+        })
+
+    return records
+
 def _get_ft_info(ticker: str) -> Dict[str, Any]:
     url = 'https://markets.ft.com/data/funds/tearsheet/summary?s=' + ticker
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -190,6 +208,33 @@ def _get_ms_info(ticker: str) -> Dict[str, Any]:
     exchange = response['domicileCountryId']
 
     return _output_quote(ticker, exchange, price, change, change_pct, asof_date, "MS")
+
+def _get_ms_history(ticker: str):
+    if (len(ticker)==12):
+        ms_code = _get_ms_code(ticker, "securityID")
+    else:
+        return []
+    
+    if ms_code is None:
+        raise ValueError("No Morningstar code found for ISIN " + ticker)
+
+    url = 'https://tools.morningstar.es/api/rest.svc/timeseries_price/t92wz0sj7c?currencyId=EUR&idtype=Morningstar&frequency=daily&outputType=JSON&startDate=2000-01-01&id=' +  ms_code + ']2]0]'
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers)
+    r.raise_for_status()
+
+    response = r.json()
+
+    data = response["TimeSeries"]["Security"][0]["HistoryDetail"]
+
+    records = []
+    for row in data:
+        records.append({
+            "date": str(row["EndDate"]),
+            "close": _safe_float(row["Value"])
+        })
+
+    return records
 
 def _get_inv_info(ticker: str) -> Dict[str, Any]:
     url = 'https://es.investing.com/funds/' + ticker.lower()
@@ -335,25 +380,33 @@ def get_history(
       symbol: "...",
       history: [{ date, close }...]
     }
-    Uses Morningstar as fallback if no data found on Yahoo.
     """
-    try:
-        if (len(ticker)==12):
-            yfTicker = _get_ms_code(ticker, "performanceID") + ".F"
-        else:
-            yfTicker = ticker
 
-        t = yf.Ticker(yfTicker)
-        hist = t.history(start="2000-01-01", end=datetime.today().strftime('%Y-%m-%d'), interval="1d", auto_adjust=False)
+    if len(ticker) == 12:
+        order = ["MS", "YF"]
+    else:
+        order = ["YF"]
 
-        records = []
-        for dt, row in hist.iterrows():
-            records.append({
-                    "date": str(dt.date()),
-                    "close": _safe_float(row.get("Close"))
-                })
+    out = None
+    errs = []
+    for provider in order:
+        try:
+            if provider == "YF":
+                logger.debug('Entra en Yahoo')
+                out = _get_yf_history(ticker)
+                break
+            elif provider == "MS":
+                logger.debug('Entra en MS')
+                out = _get_ms_history(ticker)
+                break
+            else:
+                continue
+        except Exception as e:
+            errs.append(f"{provider} failed: {e}")
+        
+    if out is None:
+        return JSONResponse(status_code=500, content={"error": "; ".join(errs), "symbol": ticker})
+    else:
+        return {"symbol": ticker, "historical": out}
 
-        return {"symbol": ticker, "historical": records}
-    except Exception as e:
-        logger.debug(e)
-        return JSONResponse(status_code=500, content={"error": str(e), "symbol": ticker})
+        
