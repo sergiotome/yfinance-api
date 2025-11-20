@@ -105,14 +105,14 @@ def _get_yf_info(ticker: str) -> Dict[str, Any]:
 
     return data
 
-def _get_yf_history(ticker: str):
+def _get_yf_history(ticker: str, start_date = "2000-01-01"):
     if (len(ticker)==12):
         yfTicker = _get_ms_code(ticker, "performanceID") + ".F"
     else:
         yfTicker = ticker
 
     t = yf.Ticker(yfTicker)
-    hist = t.history(start="2000-01-01", end=datetime.today().strftime('%Y-%m-%d'), interval="1d", auto_adjust=False)
+    hist = t.history(start=start_date, end=datetime.today().strftime('%Y-%m-%d'), interval="1d", auto_adjust=False)
 
     records = []
     for dt, row in hist.iterrows():
@@ -209,7 +209,7 @@ def _get_ms_info(ticker: str) -> Dict[str, Any]:
 
     return _output_quote(ticker, exchange, price, change, change_pct, asof_date, "MS")
 
-def _get_ms_history(ticker: str):
+def _get_ms_history(ticker: str, start_date = "2000-01-01"):
     if (len(ticker)==12):
         ms_code = _get_ms_code(ticker, "securityID")
     else:
@@ -218,7 +218,7 @@ def _get_ms_history(ticker: str):
     if ms_code is None:
         raise ValueError("No Morningstar code found for ISIN " + ticker)
 
-    url = 'https://tools.morningstar.es/api/rest.svc/timeseries_price/t92wz0sj7c?currencyId=EUR&idtype=Morningstar&frequency=daily&outputType=JSON&startDate=2000-01-01&id=' +  ms_code + ']2]0]'
+    url = 'https://tools.morningstar.es/api/rest.svc/timeseries_price/t92wz0sj7c?currencyId=EUR&idtype=Morningstar&frequency=daily&outputType=JSON&startDate=' + start_date + '&id=' +  ms_code + ']2]0]'
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, headers=headers)
     r.raise_for_status()
@@ -409,4 +409,60 @@ def get_history(
     else:
         return {"symbol": ticker, "historical": out}
 
-        
+@app.get("/trendhistory")
+def get_history(
+    tickers: str = Query(..., description="Ticker symbols and start dates, e.g. ACN@@2022-01-01,AMZ@@2025-06-01"),
+):
+    """
+    Returns daily historical OHLCV since the provided start date for all stocks requested.
+    {
+      symbol: "...",
+      history: [{ date, close }...]
+    }
+    """
+
+    tickerList = tickers.split(',')
+
+    if len(tickerList) == 0:
+        return JSONResponse(status_code=400, content={"error": "No tickers provided"})
+    else:
+        out = []
+        errs = []
+
+        for tickerElement in tickerList:
+            logger.debug(tickerElement)
+            parts = tickerElement.split('@@')
+            ticker = parts[0]
+            start_date = parts[1] if len(parts) > 1 else None
+
+            if len(ticker) == 12:
+                order = ["MS", "YF"]
+            else:
+                order = ["YF"]
+
+            for provider in order:
+                try:
+                    if provider == "YF":
+                        logger.debug('Entra en Yahoo')
+                        out.append({
+                                "symbol": ticker,
+                                "historical": _get_yf_history(ticker, start_date)
+                            })
+                        break
+                    elif provider == "MS":
+                        logger.debug('Entra en MS')
+                        out.append({
+                                "symbol": ticker,
+                                "historical": _get_ms_history(ticker, start_date)
+                            })
+                        break
+                    else:
+                        continue
+                except Exception as e:
+                    errs.append(f"{provider} failed: {e}")
+            
+        if out is None or len(out) == 0:
+            return JSONResponse(status_code=500, content={"error": "; ".join(errs), "symbol": ticker})
+        else:
+            return out
+      
