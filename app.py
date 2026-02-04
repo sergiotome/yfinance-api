@@ -86,6 +86,7 @@ def _get_yf_info(ticker: str) -> Dict[str, Any]:
     # fast_info is preferred when available
     fi = getattr(t, "fast_info", {}) or {}
     info = getattr(t, "info", {}) or {}
+    recommendations = t.recommendations
 
     data = {
         "symbol": ticker,
@@ -100,7 +101,11 @@ def _get_yf_info(ticker: str) -> Dict[str, Any]:
         "open": _safe_float(_safe_get(fi, "open", _safe_get(info, "regularMarketOpen"))),
         "previousClose": _safe_float(_safe_get(fi, "previous_close", _safe_get(info, "regularMarketPreviousClose"))),
         "timestamp": strftime('%Y-%m-%d %H:%M:%S', localtime(_safe_get(info, "regularMarketTime"))),
-        "source": "YF"
+        "targetHighPrice": _safe_float(_safe_get(info, "targetHighPrice")),
+        "targetLowPrice": _safe_float(_safe_get(info, "targetLowPrice")),
+        "targetMeanPrice": _safe_float(_safe_get(info, "targetMeanPrice")),
+        "source": "YF",
+        "recommendations": recommendations.reset_index().to_dict(orient="records") if recommendations is not None and not recommendations.empty else []
     }
 
     return data
