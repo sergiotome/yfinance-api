@@ -1,16 +1,14 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 import yfinance as yf
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 import logging
 import requests
-from bs4 import BeautifulSoup
-import re 
 from time import strftime, localtime
 
-app = FastAPI(title="Unofficial Finance API (Yahoo via yfinance & markets.ft.com)", version="2.0.0")
+app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar", version="2.1.0")
 
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
