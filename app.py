@@ -8,7 +8,7 @@ import logging
 import requests
 from time import strftime, localtime
 
-app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar", version="2.1.0")
+app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar", version="2.2.0")
 
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
