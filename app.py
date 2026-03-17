@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Optional, Dict, Any
 import yfinance as yf
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import logging
 import requests
 from time import strftime, localtime
@@ -81,7 +81,8 @@ def _get_yf_history(ticker: str, start_date = "2000-01-01"):
             _ = datetime.strptime(start_date, "%Y-%m-%d")
         except Exception:
             start_date = "2000-01-01"
-        hist = t.history(start=start_date, end=datetime.today().strftime('%Y-%m-%d'), interval="1d", auto_adjust=False)
+        # Get history and generate output
+        hist = t.history(start=start_date, end=(datetime.today() - timedelta(days=1)).strftime('%Y-%m-%d'), interval="1d", auto_adjust=False)
         records = [
             {"date": str(dt.date()), "close": _safe_float(row.get("Close"))}
             for dt, row in hist.iterrows()
@@ -118,7 +119,6 @@ def _get_ms_history(ticker: str, start_date = "2000-01-01"):
     if not start_date:
         start_date = "2000-01-01"
     url = f'https://tools.morningstar.es/api/rest.svc/timeseries_price/t92wz0sj7c?currencyId=EUR&idtype=Morningstar&frequency=daily&outputType=JSON&startDate={start_date}&id={ms_code}]2]0]'
-    logger.debug(url)
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, headers=headers)
