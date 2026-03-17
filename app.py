@@ -8,7 +8,7 @@ import logging
 import requests
 from time import strftime, localtime
 
-app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar", version="2.3.0")
+app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar", version="2.3.1")
 
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
@@ -82,10 +82,14 @@ def _get_yf_history(ticker: str, start_date = "2000-01-01"):
         except Exception:
             start_date = "2000-01-01"
         # Get history and generate output
-        hist = t.history(start=start_date, end=(datetime.today() - timedelta(days=1)).strftime('%Y-%m-%d'), interval="1d", auto_adjust=False)
+        logger.debug(f"Fetching history for {ticker} until {datetime.today().strftime('%Y-%m-%d')}")
+        hist = t.history(start=start_date, end=datetime.today().strftime('%Y-%m-%d'), interval="1d", auto_adjust=False)
         records = [
-            {"date": str(dt.date()), "close": _safe_float(row.get("Close"))}
+            {"date": str(dt.date()), "close": close}
             for dt, row in hist.iterrows()
+            if (close := _safe_float(row.get("Close"))) is not None
+                and close == close
+                and close > 0
         ]
         return records
     except Exception as e:
