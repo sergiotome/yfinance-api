@@ -2,3 +2,10 @@ fastapi==0.129.0
 uvicorn==0.41.0
 yfinance==1.2.0
 requests==2.32.5
+google-genai
+google-api-core
+pandas
+openpyxl
+python-dotenv
+python-multipart
+load_dotenv

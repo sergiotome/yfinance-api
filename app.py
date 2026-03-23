@@ -1,18 +1,33 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Optional, Dict, Any
 import yfinance as yf
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 import logging
 import requests
 from time import strftime, localtime
+import os
+import io
+import pandas as pd
+from google import genai
+from google.api_core import exceptions
+from google.genai import types
+from dotenv import load_dotenv
+import numpy as np
+#import time
 
-app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar", version="2.3.1")
+# Load local .env file if it exists
+load_dotenv()
+
+app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar. Also send data for analysis to Gemini", version="3.0.0")
+
+# Initialize Gemini Client
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=GEMINI_KEY)
 
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
-
 
 # Allow all origins by default (adjust if needed)
 app.add_middleware(
@@ -155,6 +170,7 @@ def _output_quote(symbol: str, exchange: str, price: Optional[float], change: Op
         "source": source
     }
 
+
 @app.get("/")
 def root():
     return {
@@ -165,6 +181,7 @@ def root():
             "Mutual funds typically have one NAV per day.",
         ]
     }
+
 
 @app.get("/quote")
 def get_quote(symbols: str = Query(..., description="Comma-separated list")):
@@ -236,6 +253,7 @@ def get_history(
     else:
         return {"symbol": ticker, "historical": out}
 
+
 @app.get("/trendhistory")
 def get_trendhistory(
     tickers: str = Query(..., description="Ticker symbols and start dates, e.g. ACN@@2022-01-01,AMZ@@2025-06-01"),
@@ -280,4 +298,214 @@ def get_trendhistory(
     if not out:
         return JSONResponse(status_code=500, content={"error": "; ".join(errs)})
     return out
-      
+
+
+@app.post("/analyze-finances")
+async def analyze_finances(
+    file: UploadFile = File(...),
+    mode: str = Form("full"),  # 'full_report', 'last_month', 'custom'
+    user_query: Optional[str] = Form(None)
+):
+    try:
+        content = await file.read()
+        summary = generate_summary_data(content)
+        
+        if mode == "last_month":
+            # Filtramos el último mes en Pandas antes de enviarlo
+            context_df = get_last_month_data(summary)
+            data_to_send = context_df.to_csv(index=False)
+            system_instruction = f"""
+                Actúa como un Economista Senior y Asesor Financiero experto en el mercado español. 
+                Tu misión es auditar los gastos e ingresos del último mes teniendo en cuenta el CONTEXTO SOCIOECONÓMICO (España/Madrid).
+                Te proporciono los datos de ese mes junto con dos contextos críticos:
+                1. TENDENCIA RECIENTE: Los 3 meses inmediatamente anteriores.
+                2. ESTACIONALIDAD: El mismo mes en años anteriores.
+
+                DATOS MENSUALES (Mes, Categoría, Subcategoría, Total, Nº Transacciones):
+                {data_to_send}
+
+                TAREAS:
+                - Compara el gasto total y por categorías del último mes vs la media de los 3 meses anteriores.
+                - Compara el último mes vs el mismo mes de los 5 años anteriores (¿Hay inflación real o cambio de hábito?).
+                - Detecta si este mes ha habido un ingreso atípico o un gasto que rompe la estacionalidad.
+
+                REGLA: Sé extremadamente breve. Usa una tabla Markdown para la comparativa rápida y 3 puntos clave de análisis.
+                """
+        elif mode == "custom" and user_query:
+            data_to_send = summary.to_csv()
+            system_instruction = f"""
+                Actúa como un Economista Senior y Asesor Financiero experto en el mercado español que analiza los datos financieros del usuario.
+                DATOS MENSUALES (Mes, Categoría, Subcategoría, Total, Nº Transacciones): 
+                {data_to_send}
+
+                PREGUNTA DEL USUARIO: {user_query}
+               
+                INSTRUCCIONES: 
+                - Responde de forma breve y concisa, basándote en los datos proporcionados y teniendo en cuenta el CONTEXTO SOCIOECONÓMICO (España/Madrid).
+                - Si la pregunta no tiene que ver con las finanzas familiares, recuérdale amablemente que solo puedes analizar sus finanzas.
+                - Usa un tono cercano pero profesional.
+                """
+        else: # full
+            # 1. Separar Ingresos y Gastos por el signo del Importe
+            # En tu summary, 'sum' es el nombre que le diste a la agregación del Importe
+            ingresos_df = summary[summary['sum'] > 0].copy()
+            gastos_df = summary[summary['sum'] < 0].copy()
+            gastos_df['sum'] = gastos_df['sum'] * -1 # Convertimos a positivo para el análisis
+
+            # 2. Generar Estadísticas Anuales de Referencia (La "Verdad" para Gemini)
+            resumen_anual = summary.copy()
+            resumen_anual['Año'] = resumen_anual['Mes'].str[:4]
+
+            # Calculamos totales por año
+            stats = resumen_anual.groupby('Año')['sum'].agg(
+                Ingresos = lambda x: x[x > 0].sum(),
+                Gastos = lambda x: abs(x[x < 0].sum())
+            ).reset_index()
+
+            stats['Ahorro_Neto'] = stats['Ingresos'] - stats['Gastos']
+            stats['%_Ahorro'] = np.where(
+                stats['Ingresos'] > 0, 
+                (stats['Ahorro_Neto'] / stats['Ingresos'] * 100).round(2), 
+                0
+            )
+
+            # Convertimos a string para el prompt
+            anual_stats_str = stats.to_string(index=False)
+            system_instruction = f"""
+                Actúa como un Economista Senior y Asesor Financiero experto en el mercado español. 
+                Tu objetivo es analizar estos movimientos bancarios de los últimos 5 años, pero NO de forma aislada, 
+                sino poniéndolos en CONTEXTO SOCIOECONÓMICO duerante ese mismo periodo de tiempo (España/Madrid).
+
+                ---
+                TABLA DE REFERENCIA ANUAL (DATOS REALES CALCULADOS):
+                {anual_stats_str}
+
+                DESGLOSE DE INGRESOS (Mensual):
+                {ingresos_df.to_csv(index=False)}
+
+                DESGLOSE DE GASTOS (Mensual):
+                {gastos_df.to_csv(index=False)}
+                ---
+
+                INSTRUCCIONES DE PRECISIÓN (Chain of Thought):
+                1. Antes de mencionar cualquier cifra de ahorro o gastos, verifícala contra los datos de referencia proporcionados.
+                2. Si detectas una discrepancia entre tu análisis y las datos de referencia, los datos siempre tiene la razón.
+                3. Para calcular variaciones, usa la fórmula: ((Valor_Nuevo - Valor_Viejo) / Valor_Viejo). Muestra el porcentaje resultante.
+
+                INSTRUCCIONES DE ANÁLISIS CONTEXTUAL:
+                1. BENCHMARKING: Compara el gasto en 'Supermercado', 'Recibos', 'Comida', 'Ocio', 'Viaje' e hijos, con el coste de vida medio de una familia en la periferia de Madrid. ¿Es un gasto razonable por el contexto o hay ineficiencia real?
+                2. AJUSTE POR INFLACIÓN: Si detectas subidas en determinadas categorías, determina si el incremento es orgánico (debido a la inflación/IPC de esos años en España) o si sugiere un cambio en el hábito de consumo.
+                3. RATIOS DE SALUD: Analiza el porcentaje de ahorro real (Ingresos vs Gastos) y compáralo con la regla 50/30/20.
+                4. ESTACIONALIDAD: Ten en cuenta factores como la subida de la luz en invierno o el gasto en ocio en verano en España.
+
+                REGLAS CRÍTICAS:
+                - TEMPERATURA DE DATOS: No inventes números. Si no estás seguro de un cálculo, cita el dato de la tabla.
+                - No te limites a decir "gastas mucho". Di: "Tu gasto ha subido un X%, pero dado que el IPC de alimentos subió un Y%, tu consumo real está bajo control" o viceversa.
+                - CONCISIÓN: Máximo 800 palabras. Evita introducciones genéricas.
+                - Usa Markdown, emojis y un tono profesional pero motivador.
+                - IDIOMA: Responde en Español.
+
+                ESTRUCTURA:
+                - Resumen Ejecutivo (Salud financiera vs Contexto país).
+                - Análisis de Tendencias Críticas (Cruze de tus datos vs Inflación/Coste vida).
+                - Alertas de Anomalías (Gastos que NO se explican por el mercado o la situación familiar).
+                - 3 Recomendaciones Estratégicas de alto impacto.
+                """
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=system_instruction,
+            config=types.GenerateContentConfig(
+                # max_output_tokens=2048, # Limit the response to ~600 words
+                temperature=0.1,       # Higher = more creative, Lower = more factual
+            )
+        )
+
+        return {"analysis": response.text}
+
+    # except exceptions.ResourceExhausted:
+    #     # This is specifically for the 429 Quota limit
+    #     return JSONResponse(
+    #         status_code=429, 
+    #         content={"error": "QUOTA_EXCEEDED", "message": "Límite diario de IA alcanzado. Vuelve a intentarlo mañana."}
+    #     )
+    # except Exception as e:
+    #     logger.error(f"Error general: {str(e)}")
+    #     return JSONResponse(
+    #         status_code=500, 
+    #         content={"error": "GENERIC_ERROR", "message": "Error al procesar los datos."}
+    #     )
+    except Exception as e:
+        error_str = str(e).upper()
+
+        # 1. Verificamos si el error contiene el código 429 o el texto de cuota        
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA" in error_str:
+            logger.warning("Límite de cuota alcanzado (429)")
+            return JSONResponse(
+                status_code=429, 
+                content={
+                    "error": "QUOTA_EXCEEDED", 
+                    "message": "Has agotado las consultas gratuitas de hoy. Gemini 2.5 Flash volverá a estar disponible mañana."
+                }
+            )
+        
+        # 2. Si no es de cuota, entonces sí es un error genérico
+        logger.error(f"Error general: {str(e)}")
+        return JSONResponse(
+            status_code=500, 
+            content={"error": "GENERIC_ERROR", "message": "Error al procesar los datos."}
+        )
+
+
+
+def generate_summary_data(content):
+    # 1. Read ONLY the 'Movimientos' tab
+    # This ignores all your other tabs
+    df = pd.read_excel(io.BytesIO(content), sheet_name='Movimientos')
+
+    # 2. Filter out 'Archivado' rows
+    # We only want the detailed movements for the analysis
+    df = df[df['Concepto'] != 'Archivado']
+
+    # 3. Convert to datetime
+    df['Fecha Contable'] = pd.to_datetime(df['Fecha Contable'])
+    
+    # 4. Obtenemos el primer día del mes actual para filtrar hasta el final del último mes
+    today = datetime.now()
+    first_day_current_month = datetime(today.year, today.month, 1)
+    df = df[df['Fecha Contable'] < first_day_current_month]
+    
+    # 5. Clean and Group the data
+    df['Fecha Contable'] = pd.to_datetime(df['Fecha Contable'])
+    df['Mes'] = df['Fecha Contable'].dt.to_period('M').astype(str)
+        
+    # 6. Aggregating by Month, Group, and SubGroup
+    summary = df.groupby(['Mes', 'Grupo', 'SubGrupo'])['Importe'].agg(['sum', 'count']).reset_index()
+
+    return summary
+
+def get_last_month_data(summary_df):
+    # Supongamos que 'Mes' está en formato 'YYYY-MM'
+    all_months = sorted(summary_df['Mes'].unique())
+    
+    # 1. Identificar el "Último Mes Cerrado" (el anterior al actual)
+    last_closed_month = all_months[-1] # El último mes en la lista ordenada es el último cerrado 
+    
+    # 2. Obtener los 3 meses inmediatamente anteriores al cerrado
+    # Ejemplo: Si el cerrado es Febrero, queremos Enero, Diciembre y Noviembre.
+    idx = all_months.index(last_closed_month)
+    recent_months = all_months[max(0, idx-3) : idx+1]
+    
+    # 3. Obtener el mismo mes de años anteriores
+    # Extraemos el sufijo '-MM' (ej: '-02')
+    month_suffix = last_closed_month[-3:] 
+    historical_same_months = [
+        m for m in all_months 
+        if m.endswith(month_suffix) and m != last_closed_month
+    ]
+
+    # 4. Combinar y filtrar el DataFrame
+    target_months = set(recent_months + historical_same_months)
+    filtered_df = summary_df[summary_df['Mes'].isin(target_months)]
+    
+    return filtered_df.sort_values('Mes')
