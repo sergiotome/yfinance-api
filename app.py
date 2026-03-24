@@ -17,17 +17,19 @@ from dotenv import load_dotenv
 import numpy as np
 #import time
 
-# Load local .env file if it exists
-load_dotenv()
 
-app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar. Also send data for analysis to Gemini", version="3.0.0")
-
-# Initialize Gemini Client
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-client = genai.Client(api_key=GEMINI_KEY)
-
+app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar. Also send data for analysis to Gemini", version="3.0.1")
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
+
+# Load local .env file if it exists or pull from the environment variables.
+load_dotenv()
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_KEY:
+    logger.error("¡ERROR: La variable GEMINI_API_KEY no está configurada!")
+
+# Initialize Gemini Client
+client = genai.Client(api_key=GEMINI_KEY)
 
 # Allow all origins by default (adjust if needed)
 app.add_middleware(
@@ -414,6 +416,7 @@ async def analyze_finances(
 
         response = client.models.generate_content(
             model="gemini-2.5-flash",
+            # model="gemini-2.5-flash-lite",
             contents=system_instruction,
             config=types.GenerateContentConfig(
                 # max_output_tokens=2048, # Limit the response to ~600 words
