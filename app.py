@@ -18,7 +18,7 @@ import numpy as np
 #import time
 
 
-app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar. Also send data for analysis to Gemini", version="3.0.1")
+app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar. Also send data for analysis to Gemini", version="3.0.2")
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
 
@@ -31,10 +31,15 @@ if not GEMINI_KEY:
 # Initialize Gemini Client
 client = genai.Client(api_key=GEMINI_KEY)
 
+# Lee los orígenes permitidos desde una variable de entorno. 
+# Si no existe, usamos localhost por defecto para no quedarnos bloqueados.
+allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "http://localhost:4200")
+origins = allowed_origins_str.split(",")
+
 # Allow all origins by default (adjust if needed)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
