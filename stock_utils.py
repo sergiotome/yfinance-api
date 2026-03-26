@@ -1,0 +1,140 @@
+from typing import Optional, Dict, Any
+import yfinance as yf
+from datetime import datetime, date
+import logging
+import requests
+from time import strftime, localtime
+
+logger = logging.getLogger('uvicorn.error')
+logger.setLevel(logging.DEBUG)
+
+def _safe_float(x):
+    try:
+        return None if x is None else float(x)
+    except Exception:
+        return None
+
+def _safe_get(d, key, default=None):
+    if isinstance(d, dict):
+        return d.get(key, default)
+    return default
+
+def _get_yf_info(ticker: str) -> Dict[str, Any]:
+    try:
+        t = yf.Ticker(ticker)
+        fi = getattr(t, "fast_info", {}) or {}
+        info = getattr(t, "info", {}) or {}
+        recommendations = getattr(t, "recommendations", None)
+        timestamp = _safe_get(info, "regularMarketTime")
+        if timestamp:
+            try:
+                timestamp = strftime('%Y-%m-%d %H:%M:%S', localtime(timestamp))
+            except Exception:
+                timestamp = None
+        data = {
+            "symbol": ticker,
+            "exchange": _safe_get(info, "exchange", _safe_get(info, "exchangeName")),
+            "price": _safe_float(_safe_get(fi, "last_price", _safe_get(info, "regularMarketPrice"))),
+            "change": _safe_float(_safe_get(info, "regularMarketChange")),
+            "changesPercentage": _safe_float(_safe_get(info, "regularMarketChangePercent")),
+            "dayLow": _safe_float(_safe_get(fi, "day_low", _safe_get(info, "dayLow"))),
+            "dayHigh": _safe_float(_safe_get(fi, "day_high", _safe_get(info, "dayHigh"))),
+            "yearHigh": _safe_float(_safe_get(fi, "year_high", _safe_get(info, "fiftyTwoWeekHigh"))),
+            "yearLow": _safe_float(_safe_get(fi, "year_low", _safe_get(info, "fiftyTwoWeekLow"))),
+            "open": _safe_float(_safe_get(fi, "open", _safe_get(info, "regularMarketOpen"))),
+            "previousClose": _safe_float(_safe_get(fi, "previous_close", _safe_get(info, "regularMarketPreviousClose"))),
+            "timestamp": timestamp,
+            "targetHighPrice": _safe_float(_safe_get(info, "targetHighPrice")),
+            "targetLowPrice": _safe_float(_safe_get(info, "targetLowPrice")),
+            "targetMeanPrice": _safe_float(_safe_get(info, "targetMeanPrice")),
+            "source": "YF",
+            "recommendations": recommendations.reset_index().to_dict(orient="records") if recommendations is not None and not recommendations.empty else []
+        }
+        return data
+    except Exception as e:
+        logger.error(f"Error in _get_yf_info for {ticker}: {e}")
+        raise
+
+def _get_yf_history(ticker: str, start_date = "2000-01-01"):
+    try:
+        t = yf.Ticker(ticker)
+        # Validate and parse start_date
+        if not start_date:
+            start_date = "2000-01-01"
+        try:
+            _ = datetime.strptime(start_date, "%Y-%m-%d")
+        except Exception:
+            start_date = "2000-01-01"
+        # Get history and generate output
+        logger.debug(f"Fetching history for {ticker} until {datetime.today().strftime('%Y-%m-%d')}")
+        hist = t.history(start=start_date, end=datetime.today().strftime('%Y-%m-%d'), interval="1d", auto_adjust=False)
+        records = [
+            {"date": str(dt.date()), "close": close}
+            for dt, row in hist.iterrows()
+            if (close := _safe_float(row.get("Close"))) is not None
+                and close == close
+                and close > 0
+        ]
+        return records
+    except Exception as e:
+        logger.error(f"Error in _get_yf_history for {ticker}: {e}")
+        raise
+
+def _get_ms_info(ticker: str) -> Dict[str, Any]:
+    ms_code = ticker
+    if not ms_code:
+        raise ValueError(f"No Morningstar code found for ISIN {ticker}")
+    url = f'https://api-global.morningstar.com/sal-service/v1/fund/quote/v7/{ms_code}/data?fundServCode=&showAnalystRatingChinaFund=false&showAnalystRating=false&hideesg=false&region=EEA&languageId=es&locale=es&clientId=MDC&benchmarkId=mstarorcat&component=sal-mip-investment-overview&version=4.69.0'
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*", "Apikey": "lstzFDEOhfFNMLikKa0am9mgEKLBl49T", "referer": f"https://global.morningstar.com/es/inversiones/fondos/{ticker}/cotizacion"}
+    try:
+        r = requests.get(url, headers=headers)
+        r.raise_for_status()
+        response = r.json()
+        price = response.get('latestPrice')
+        change_pct = response.get('trailing1DayReturn')
+        change = round(price - (price / (1 + (change_pct / 100))), 4) if price is not None and change_pct is not None else None
+        asof_date = response.get('latestPriceDate')
+        exchange = response.get('domicileCountryId')
+        return _output_quote(ticker, exchange, price, change, change_pct, asof_date, "MS")
+    except Exception as e:
+        logger.error(f"Error in _get_ms_info for {ticker}: {e}")
+        raise
+
+def _get_ms_history(ticker: str, start_date = "2000-01-01"):
+    ms_code = ticker
+    if not ms_code:
+        raise ValueError(f"No Morningstar code found for ISIN {ticker}")
+    if not start_date:
+        start_date = "2000-01-01"
+    url = f'https://tools.morningstar.es/api/rest.svc/timeseries_price/t92wz0sj7c?currencyId=EUR&idtype=Morningstar&frequency=daily&outputType=JSON&startDate={start_date}&id={ms_code}]2]0]'
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers)
+        r.raise_for_status()
+        response = r.json()
+        data = response["TimeSeries"]["Security"][0]["HistoryDetail"]
+        records = [
+            {"date": str(row["EndDate"]), "close": _safe_float(row["Value"])}
+            for row in data
+        ]
+        return records
+    except Exception as e:
+        logger.error(f"Error in _get_ms_history for {ticker}: {e}")
+        raise
+
+def _output_quote(symbol: str, exchange: str, price: Optional[float], change: Optional[float], change_pct: Optional[float], asof_date: Optional[date], source: str) -> Dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "exchange": exchange,
+        "price": price,
+        "change": change,
+        "changesPercentage": change_pct,
+        "dayLow": price,
+        "dayHigh": price,
+        "yearHigh": 0,
+        "yearLow": 0,
+        "open": price,
+        "previousClose": price - change if price is not None and change is not None else None,
+        "timestamp": asof_date,
+        "source": source
+    }
