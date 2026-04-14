@@ -6,6 +6,7 @@ import pandas as pd
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+import numpy as np
 
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
@@ -18,7 +19,6 @@ if not GEMINI_KEY:
 
 # Initialize Gemini Client
 client = genai.Client(api_key=GEMINI_KEY)
-
 
 def generate_summary_data(content):
     # 1. Read ONLY the 'Movimientos' tab
@@ -45,6 +45,60 @@ def generate_summary_data(content):
     summary = df.groupby(['Mes', 'Grupo', 'SubGrupo'])['Importe'].agg(['sum', 'count']).reset_index()
 
     return summary
+
+async def get_gemini_response(prompt: str, model: str = "gemini-2.5-flash"):
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            # max_output_tokens=2048, # Limit the response to ~600 words
+            temperature=0.1,       # Higher = more creative, Lower = more factual
+        )
+    )
+
+    return response
+
+def getFinancesPrompts(mode, summary, user_query = None):
+    if mode == "last_month":
+        return getLastMonthFinancePrompt(summary)
+    elif mode == "full":
+        return getFullFinancePrompt(summary)
+    elif mode == "custom":
+        return getCustomFinancePrompt(summary, user_query)
+    else:
+        raise ValueError("Invalid mode. Choose from 'last_month', 'full', or 'custom'.")
+
+def getLastMonthFinancePrompt(summary):
+    # Calculamos los datos relevantes en Pandas antes de enviarlo
+    filtered_df, stats_reference = get_last_month_data(summary)
+    data_to_send = filtered_df.to_string()
+
+    system_instruction = f"""
+        Actúa como un Economista Senior y Asesor Financiero experto en el mercado español. 
+        Tu misión es auditar los gastos e ingresos del último mes teniendo en cuenta el CONTEXTO SOCIOECONÓMICO (España/Madrid).
+        Te proporciono los datos de ese mes junto con dos contextos críticos:
+        1. TENDENCIA RECIENTE: Los 3 meses inmediatamente anteriores.
+        2. ESTACIONALIDAD: El mismo mes en años anteriores.
+
+        DATOS MENSUALES AGREGADOS:
+        {stats_reference}
+
+        DATOS MENSUALES POR CATEGORIA (Mes, Categoría, Subcategoría, Total, Nº Transacciones):
+        {data_to_send}
+
+        TAREAS:
+        - Compara el gasto total y por categorías del último mes vs la media de los 3 meses anteriores.
+        - Compara el último mes vs el mismo mes de los 5 años anteriores (¿Hay inflación real o cambio de hábito?).
+        - Detecta si este mes ha habido un ingreso atípico o un gasto que rompe la estacionalidad.
+
+        INSTRUCCIONES CRÍTICAS:
+        1. Los totales de ingresos, gastos y medias DEBEN coincidir exactamente con las 'DATOS MENSUALES AGREGADOS' arriba indicadas.
+        2. Utiliza los 'DATOS MENSUALES POR CATEGORIA' solo para explicar en qué categorías se ha gastado más o menos (desglose).
+
+        REGLA: Sé extremadamente breve. Usa una tabla Markdown para la comparativa rápida y 3 puntos clave de análisis.
+    """
+
+    return system_instruction
 
 def get_last_month_data(summary_df):
     all_months = sorted(summary_df['Mes'].unique())
@@ -94,15 +148,154 @@ def get_last_month_data(summary_df):
     relevant_data = summary_df[summary_df['Mes'].isin([last_closed_month] + prev_3_months + same_month_prev_years)]
     return relevant_data, stats_reference
 
-async def get_gemini_response(prompt: str):
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        # model="gemini-2.5-flash-lite",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            # max_output_tokens=2048, # Limit the response to ~600 words
-            temperature=0.1,       # Higher = more creative, Lower = more factual
-        )
+def getFullFinancePrompt(summary):
+    # 1. Separar Ingresos y Gastos por el signo del Importe
+    # En tu summary, 'sum' es el nombre que le diste a la agregación del Importe
+    ingresos_df = summary[summary['sum'] > 0].copy()
+    gastos_df = summary[summary['sum'] < 0].copy()
+    gastos_df['sum'] = gastos_df['sum'] * -1 # Convertimos a positivo para el análisis
+
+    # 2. Generar Estadísticas Anuales de Referencia (La "Verdad" para Gemini)
+    resumen_anual = summary.copy()
+    resumen_anual['Año'] = resumen_anual['Mes'].str[:4]
+
+    # Calculamos totales por año
+    stats = resumen_anual.groupby('Año')['sum'].agg(
+        Ingresos = lambda x: x[x > 0].sum(),
+        Gastos = lambda x: abs(x[x < 0].sum())
+    ).reset_index()
+
+    stats['Ahorro_Neto'] = stats['Ingresos'] - stats['Gastos']
+    stats['%_Ahorro'] = np.where(
+        stats['Ingresos'] > 0, 
+        (stats['Ahorro_Neto'] / stats['Ingresos'] * 100).round(2), 
+        0
     )
 
-    return response
+    # Convertimos a string para el prompt
+    anual_stats_str = stats.to_string(index=False)
+    system_instruction = f"""
+        Actúa como un Economista Senior y Asesor Financiero experto en el mercado español. 
+        Tu objetivo es analizar estos movimientos bancarios de los últimos 5 años, pero NO de forma aislada, 
+        sino poniéndolos en CONTEXTO SOCIOECONÓMICO duerante ese mismo periodo de tiempo (España/Madrid).
+
+        ---
+        TABLA DE REFERENCIA ANUAL (DATOS REALES CALCULADOS):
+        {anual_stats_str}
+
+        DESGLOSE DE INGRESOS (Mensual):
+        {ingresos_df.to_csv(index=False)}
+
+        DESGLOSE DE GASTOS (Mensual):
+        {gastos_df.to_csv(index=False)}
+        ---
+
+        INSTRUCCIONES DE PRECISIÓN (Chain of Thought):
+        1. Antes de mencionar cualquier cifra de ahorro o gastos, verifícala contra los datos de referencia proporcionados.
+        2. Si detectas una discrepancia entre tu análisis y las datos de referencia, los datos siempre tiene la razón.
+        3. Para calcular variaciones, usa la fórmula: ((Valor_Nuevo - Valor_Viejo) / Valor_Viejo). Muestra el porcentaje resultante.
+
+        INSTRUCCIONES DE ANÁLISIS CONTEXTUAL:
+        1. BENCHMARKING: Compara el gasto en 'Supermercado', 'Recibos', 'Comida', 'Ocio', 'Viaje' e hijos, con el coste de vida medio de una familia en la periferia de Madrid. ¿Es un gasto razonable por el contexto o hay ineficiencia real?
+        2. AJUSTE POR INFLACIÓN: Si detectas subidas en determinadas categorías, determina si el incremento es orgánico (debido a la inflación/IPC de esos años en España) o si sugiere un cambio en el hábito de consumo.
+        3. RATIOS DE SALUD: Analiza el porcentaje de ahorro real (Ingresos vs Gastos) y compáralo con la regla 50/30/20.
+        4. ESTACIONALIDAD: Ten en cuenta factores como la subida de la luz en invierno o el gasto en ocio en verano en España.
+
+        REGLAS CRÍTICAS:
+        - TEMPERATURA DE DATOS: No inventes números. Si no estás seguro de un cálculo, cita el dato de la tabla.
+        - No te limites a decir "gastas mucho". Di: "Tu gasto ha subido un X%, pero dado que el IPC de alimentos subió un Y%, tu consumo real está bajo control" o viceversa.
+        - CONCISIÓN: Máximo 800 palabras. Evita introducciones genéricas.
+        - Usa Markdown, emojis y un tono profesional pero motivador.
+        - IDIOMA: Responde en Español.
+
+        ESTRUCTURA:
+        - Resumen Ejecutivo (Salud financiera vs Contexto país).
+        - Análisis de Tendencias Críticas (Cruze de tus datos vs Inflación/Coste vida).
+        - Alertas de Anomalías (Gastos que NO se explican por el mercado o la situación familiar).
+        - 3 Recomendaciones Estratégicas de alto impacto.
+    """
+            
+    return system_instruction
+
+def getCustomFinancePrompt(summary, user_query):
+    data_to_send = summary.to_csv()
+    system_instruction = f"""
+        Actúa como un Economista Senior y Asesor Financiero experto en el mercado español que analiza los datos financieros del usuario.
+        DATOS MENSUALES (Mes, Categoría, Subcategoría, Total, Nº Transacciones): 
+        {data_to_send}
+
+        PREGUNTA DEL USUARIO: {user_query}
+               
+        INSTRUCCIONES: 
+        - Responde de forma breve y concisa, basándote en los datos proporcionados y teniendo en cuenta el CONTEXTO SOCIOECONÓMICO (España/Madrid).
+        - Si la pregunta no tiene que ver con las finanzas familiares, recuérdale amablemente que solo puedes analizar sus finanzas.
+        - Usa un tono cercano pero profesional.
+    """
+
+    return system_instruction
+
+def getPortfolioPrompts(mode, portfolio_data, user_query = None):
+    if mode == "portfolio":
+        return getPortfolioOverviewPrompt(portfolio_data)
+    elif mode == "custom":
+        return getCustomPortfolioPrompt(portfolio_data, user_query)
+    else:
+        raise ValueError("Invalid mode. Choose from 'overview' or 'custom'.")
+
+def getPortfolioOverviewPrompt(portfolio_data):
+    system_instruction = f"""
+        Actúa como un Analista Financiero experto en el mercado global de valores. 
+        Tu misión es analizar el rendimiento de la cartera de inversiones y proponer cambios relevantes en base al contexto socio-economico actual.
+                    
+        Te proporciono los datos de todas las inversiones actualmente en la cartera, incluyendo cada una de las compras de participaciones con su fecha y coste:
+                
+        CARTERA DE INVERSIONES EN FORMATO JSON:
+        {portfolio_data}
+
+        TAREAS:
+        - Analiza el rendimiento de cada inversión en la cartera, teniendo en cuenta su evolución histórica y su contexto actual.
+        - Compara el rendimiento de cada inversión con su benchmark de referencia (ej. IBEX35 para acciones españolas, S&P500 para americanas, etc.).
+        - Detecta si alguna inversión ha tenido un rendimiento atípico o se ha desviado significativamente de su benchmark, analiza posibles causas y propón una acción concreta (mantener, vender, comprar más) con su justificación.
+        - Proporciona una recomendación general sobre la salud de la cartera y si es necesario hacer ajustes para mejorar su rendimiento o reducir riesgos, teniendo en cuenta el contexto socio-económico actual (inflación, tipos de interés, situación geopolítica, etc.).
+        - Si el usuario no ha proporcionado información suficiente para hacer un análisis completo, indícalo claramente y sugiere qué datos adicionales serían necesarios para un análisis más preciso.
+
+        A TENER EN CUENTA:
+        - Las inversiones en IE00BK5BQT80 (Vanguard FTSE All-World UCITS ETF USD Acc) son inversiones a futuro para cada uno de mis hijos (Naia y Unai), el resto son inversiones personales.
+
+        INSTRUCCIONES: 
+        - Responde de forma breve y concisa, y evita introducciones genéricas. 
+        - Basándote en los datos proporcionados y teniendo en cuenta el CONTEXTO SOCIOECONÓMICO actual.
+        - Usa Markdown, emojis y un tono cercano pero profesional.
+        - IDIOMA: Responde en Español.
+    """
+
+    return system_instruction
+
+def getCustomPortfolioPrompt(portfolio_data, user_query):
+    system_instruction = f"""
+        Actúa como un Analista Financiero experto en el mercado global de valores que analiza la cartera de inversiones del usuario.
+                
+        CARTERA DE INVERSIONES EN FORMATO JSON:
+        {portfolio_data}
+
+        PREGUNTA DEL USUARIO: {user_query}
+               
+        INSTRUCCIONES: 
+        - Responde de forma breve y concisa, basándote en los datos proporcionados y teniendo en cuenta el contexto socio-económico global.
+        - Si la pregunta no tiene que ver con la cartera de valores, recuérdale amablemente que solo puedes analizar sus inversiones.
+        - Usa un tono cercano pero profesional.
+        - Usa Markdown, emojis y responde en español.
+    """
+    
+    return system_instruction
+
+
+# async def get_gemini_models():
+#     logger.debug("Fetching available Gemini models...")
+#     response = client.models.list()
+
+#     for model in response:
+#         logger.debug(f"Model: {model.name}, Display Name: {model.display_name}")
+
+#     # logger.debug(f"Available models: {[model.name for model in response.models]}")
+#     return response

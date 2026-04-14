@@ -1,15 +1,13 @@
 from fastapi import FastAPI, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from typing import Optional
+from typing import Annotated, Optional
 import logging
 import os
-import numpy as np
-
 import stock_utils as su
 import genAI_utils as gu
 
-app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar. Also send data for analysis to Gemini", version="3.1.0")
+app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar. Also send data for analysis to Gemini", version="3.2.0")
 
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
@@ -152,124 +150,15 @@ def get_trendhistory(
 @app.post("/analyze-finances")
 async def analyze_finances(
     file: UploadFile = File(...),
-    mode: str = Form("full"),  # 'full_report', 'last_month', 'custom'
-    user_query: Optional[str] = Form(None)
+    mode: Annotated[str, Form()] = "full",  # 'full_report', 'last_month', 'custom'
+    model: Annotated[Optional[str], Form()] = "gemini-2.5-flash", # 'gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3.1-flash-live-preview', 'gemini-2.5-flash-lite'
+    user_query: Annotated[Optional[str], Form()] = None
 ):
     try:
         content = await file.read()
         summary = gu.generate_summary_data(content)
-        
-        if mode == "last_month":
-            # Calculamos los datos relevantes en Pandas antes de enviarlo
-            filtered_df, stats_reference = gu.get_last_month_data(summary)
-            data_to_send = filtered_df.to_string()
-
-            system_instruction = f"""
-                Actúa como un Economista Senior y Asesor Financiero experto en el mercado español. 
-                Tu misión es auditar los gastos e ingresos del último mes teniendo en cuenta el CONTEXTO SOCIOECONÓMICO (España/Madrid).
-                Te proporciono los datos de ese mes junto con dos contextos críticos:
-                1. TENDENCIA RECIENTE: Los 3 meses inmediatamente anteriores.
-                2. ESTACIONALIDAD: El mismo mes en años anteriores.
-
-                DATOS MENSUALES AGREGADOS:
-                {stats_reference}
-
-                DATOS MENSUALES POR CATEGORIA (Mes, Categoría, Subcategoría, Total, Nº Transacciones):
-                {data_to_send}
-
-                TAREAS:
-                - Compara el gasto total y por categorías del último mes vs la media de los 3 meses anteriores.
-                - Compara el último mes vs el mismo mes de los 5 años anteriores (¿Hay inflación real o cambio de hábito?).
-                - Detecta si este mes ha habido un ingreso atípico o un gasto que rompe la estacionalidad.
-
-                INSTRUCCIONES CRÍTICAS:
-                1. Los totales de ingresos, gastos y medias DEBEN coincidir exactamente con las 'DATOS MENSUALES AGREGADOS' arriba indicadas.
-                2. Utiliza los 'DATOS MENSUALES POR CATEGORIA' solo para explicar en qué categorías se ha gastado más o menos (desglose).
-
-                REGLA: Sé extremadamente breve. Usa una tabla Markdown para la comparativa rápida y 3 puntos clave de análisis.
-            """
-        elif mode == "custom" and user_query:
-            data_to_send = summary.to_csv()
-            system_instruction = f"""
-                Actúa como un Economista Senior y Asesor Financiero experto en el mercado español que analiza los datos financieros del usuario.
-                DATOS MENSUALES (Mes, Categoría, Subcategoría, Total, Nº Transacciones): 
-                {data_to_send}
-
-                PREGUNTA DEL USUARIO: {user_query}
-               
-                INSTRUCCIONES: 
-                - Responde de forma breve y concisa, basándote en los datos proporcionados y teniendo en cuenta el CONTEXTO SOCIOECONÓMICO (España/Madrid).
-                - Si la pregunta no tiene que ver con las finanzas familiares, recuérdale amablemente que solo puedes analizar sus finanzas.
-                - Usa un tono cercano pero profesional.
-                """
-        else: # full
-            # 1. Separar Ingresos y Gastos por el signo del Importe
-            # En tu summary, 'sum' es el nombre que le diste a la agregación del Importe
-            ingresos_df = summary[summary['sum'] > 0].copy()
-            gastos_df = summary[summary['sum'] < 0].copy()
-            gastos_df['sum'] = gastos_df['sum'] * -1 # Convertimos a positivo para el análisis
-
-            # 2. Generar Estadísticas Anuales de Referencia (La "Verdad" para Gemini)
-            resumen_anual = summary.copy()
-            resumen_anual['Año'] = resumen_anual['Mes'].str[:4]
-
-            # Calculamos totales por año
-            stats = resumen_anual.groupby('Año')['sum'].agg(
-                Ingresos = lambda x: x[x > 0].sum(),
-                Gastos = lambda x: abs(x[x < 0].sum())
-            ).reset_index()
-
-            stats['Ahorro_Neto'] = stats['Ingresos'] - stats['Gastos']
-            stats['%_Ahorro'] = np.where(
-                stats['Ingresos'] > 0, 
-                (stats['Ahorro_Neto'] / stats['Ingresos'] * 100).round(2), 
-                0
-            )
-
-            # Convertimos a string para el prompt
-            anual_stats_str = stats.to_string(index=False)
-            system_instruction = f"""
-                Actúa como un Economista Senior y Asesor Financiero experto en el mercado español. 
-                Tu objetivo es analizar estos movimientos bancarios de los últimos 5 años, pero NO de forma aislada, 
-                sino poniéndolos en CONTEXTO SOCIOECONÓMICO duerante ese mismo periodo de tiempo (España/Madrid).
-
-                ---
-                TABLA DE REFERENCIA ANUAL (DATOS REALES CALCULADOS):
-                {anual_stats_str}
-
-                DESGLOSE DE INGRESOS (Mensual):
-                {ingresos_df.to_csv(index=False)}
-
-                DESGLOSE DE GASTOS (Mensual):
-                {gastos_df.to_csv(index=False)}
-                ---
-
-                INSTRUCCIONES DE PRECISIÓN (Chain of Thought):
-                1. Antes de mencionar cualquier cifra de ahorro o gastos, verifícala contra los datos de referencia proporcionados.
-                2. Si detectas una discrepancia entre tu análisis y las datos de referencia, los datos siempre tiene la razón.
-                3. Para calcular variaciones, usa la fórmula: ((Valor_Nuevo - Valor_Viejo) / Valor_Viejo). Muestra el porcentaje resultante.
-
-                INSTRUCCIONES DE ANÁLISIS CONTEXTUAL:
-                1. BENCHMARKING: Compara el gasto en 'Supermercado', 'Recibos', 'Comida', 'Ocio', 'Viaje' e hijos, con el coste de vida medio de una familia en la periferia de Madrid. ¿Es un gasto razonable por el contexto o hay ineficiencia real?
-                2. AJUSTE POR INFLACIÓN: Si detectas subidas en determinadas categorías, determina si el incremento es orgánico (debido a la inflación/IPC de esos años en España) o si sugiere un cambio en el hábito de consumo.
-                3. RATIOS DE SALUD: Analiza el porcentaje de ahorro real (Ingresos vs Gastos) y compáralo con la regla 50/30/20.
-                4. ESTACIONALIDAD: Ten en cuenta factores como la subida de la luz en invierno o el gasto en ocio en verano en España.
-
-                REGLAS CRÍTICAS:
-                - TEMPERATURA DE DATOS: No inventes números. Si no estás seguro de un cálculo, cita el dato de la tabla.
-                - No te limites a decir "gastas mucho". Di: "Tu gasto ha subido un X%, pero dado que el IPC de alimentos subió un Y%, tu consumo real está bajo control" o viceversa.
-                - CONCISIÓN: Máximo 800 palabras. Evita introducciones genéricas.
-                - Usa Markdown, emojis y un tono profesional pero motivador.
-                - IDIOMA: Responde en Español.
-
-                ESTRUCTURA:
-                - Resumen Ejecutivo (Salud financiera vs Contexto país).
-                - Análisis de Tendencias Críticas (Cruze de tus datos vs Inflación/Coste vida).
-                - Alertas de Anomalías (Gastos que NO se explican por el mercado o la situación familiar).
-                - 3 Recomendaciones Estratégicas de alto impacto.
-                """
-
-        response = await gu.get_gemini_response(system_instruction)
+        system_instruction = gu.getFinancesPrompts(mode, summary, user_query)
+        response = await gu.get_gemini_response(system_instruction, model)
 
         return {"analysis": response.text}
 
@@ -291,7 +180,69 @@ async def analyze_finances(
         logger.error(f"Error general: {str(e)}")
         return JSONResponse(
             status_code=500, 
-            content={"error": "GENERIC_ERROR", "message": "Error al procesar los datos."}
+            content={"error": "GENERIC_ERROR", "message": "Error al procesar los datos: " + e.message}
         )
 
+
+@app.post("/analyze-portfolio")
+async def analyze_portfolio(
+    portfolio: Annotated[str, Form()],
+    mode: Annotated[str, Form()] = "portfolio",  # 'portfolio', 'custom'
+    model: Annotated[Optional[str], Form()] = "gemini-2.5-flash", # 'gemini-2.5-flash', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3.1-flash-live-preview', 'gemini-2.5-flash-lite'
+    user_query: Annotated[Optional[str], Form()] = None
+):
+    try:
+        system_instruction = gu.getPortfolioPrompts(mode, portfolio, user_query)
+        response = await gu.get_gemini_response(system_instruction, model)
+
+        return {"analysis": response.text}
+
+    except Exception as e:
+        error_str = str(e).upper()
+
+        # 1. Verificamos si el error contiene el código 429 o el texto de cuota        
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA" in error_str:
+            logger.warning("Límite de cuota alcanzado (429)")
+            return JSONResponse(
+                status_code=429, 
+                content={
+                    "error": "QUOTA_EXCEEDED", 
+                    "message": "Has agotado las consultas gratuitas de hoy. Gemini 2.5 Flash volverá a estar disponible mañana."
+                }
+            )
+        
+        # 2. Si no es de cuota, entonces sí es un error genérico
+        logger.error(f"Error general: {str(e)}")
+        return JSONResponse(
+            status_code=500, 
+            content={"error": "GENERIC_ERROR", "message": "Error al procesar los datos: " + e.message}
+        )
+
+
+# @app.get("/gemini-models")
+# async def gemini_models():
+#     try:        
+#         response = await gu.get_gemini_models()
+#         return response
+
+#     except Exception as e:
+#         error_str = str(e).upper()
+
+#         # 1. Verificamos si el error contiene el código 429 o el texto de cuota        
+#         if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA" in error_str:
+#             logger.warning("Límite de cuota alcanzado (429)")
+#             return JSONResponse(
+#                 status_code=429, 
+#                 content={
+#                     "error": "QUOTA_EXCEEDED", 
+#                     "message": "Has agotado las consultas gratuitas de hoy. Gemini 2.5 Flash volverá a estar disponible mañana."
+#                 }
+#             )
+        
+#         # 2. Si no es de cuota, entonces sí es un error genérico
+#         logger.error(f"Error general: {str(e)}")
+#         return JSONResponse(
+#             status_code=500, 
+#             content={"error": "GENERIC_ERROR", "message": "Error al procesar los datos: " + e.message}
+#         )
 
