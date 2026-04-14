@@ -7,6 +7,7 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 import numpy as np
+from openai import OpenAI
 
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
@@ -14,12 +15,56 @@ logger.setLevel(logging.DEBUG)
 # Load local .env file if it exists or pull from the environment variables.
 load_dotenv()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_KEY:
-    logger.error("¡ERROR: La variable GEMINI_API_KEY no está configurada!")
+OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# Initialize Gemini Client
-client = genai.Client(api_key=GEMINI_KEY)
+async def get_ai_response(prompt: str, model: str = "gemini-2.5-flash"):
+    if model.startswith("gemini"):
+        response = await get_gemini_response(prompt, model)
+    else:
+        response = await get_openrouter_response(prompt, model)
 
+    return response
+
+async def get_gemini_response(prompt: str, model: str):
+    if not GEMINI_KEY:
+        raise ValueError("¡ERROR: La variable GEMINI_API_KEY no está configurada!")
+
+    # Initialize Gemini Client
+    client = genai.Client(api_key=GEMINI_KEY)
+
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            # max_output_tokens=2048,   # Limit the response to ~600 words
+            temperature=0.1,            # Higher = more creative, Lower = more factual
+        )
+    )
+
+    return response.text
+
+async def get_openrouter_response(prompt: str, model: str):
+    if not OPENROUTER_KEY:
+        raise ValueError("¡ERROR: La variable OPENROUTER_API_KEY no está configurada!")
+    
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_KEY,
+    )
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user","content": prompt}],
+        extra_body={"reasoning": {"enabled": True}}
+    )
+    response = response.choices[0].message.content
+
+    return response
+
+
+#-------------------------------------------------------------------#
+# Financial Analysis functions                                      #
+#-------------------------------------------------------------------#
 def generate_summary_data(content):
     # 1. Read ONLY the 'Movimientos' tab
     # This ignores all your other tabs
@@ -45,18 +90,6 @@ def generate_summary_data(content):
     summary = df.groupby(['Mes', 'Grupo', 'SubGrupo'])['Importe'].agg(['sum', 'count']).reset_index()
 
     return summary
-
-async def get_gemini_response(prompt: str, model: str = "gemini-2.5-flash"):
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            # max_output_tokens=2048, # Limit the response to ~600 words
-            temperature=0.1,       # Higher = more creative, Lower = more factual
-        )
-    )
-
-    return response
 
 def getFinancesPrompts(mode, summary, user_query = None):
     if mode == "last_month":
@@ -234,6 +267,9 @@ def getCustomFinancePrompt(summary, user_query):
 
     return system_instruction
 
+#-------------------------------------------------------------------#
+# Portfolio Analysis functions                                      #
+#-------------------------------------------------------------------#
 def getPortfolioPrompts(mode, portfolio_data, user_query = None):
     if mode == "portfolio":
         return getPortfolioOverviewPrompt(portfolio_data)

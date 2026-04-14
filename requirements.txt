@@ -9,3 +9,4 @@ openpyxl
 python-dotenv
 python-multipart
 load_dotenv
+openai
