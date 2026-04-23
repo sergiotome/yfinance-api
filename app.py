@@ -7,7 +7,7 @@ import os
 import stock_utils as su
 import genAI_utils as gu
 
-app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar. Also send data for analysis to Gemini", version="3.3.0")
+app = FastAPI(title="STG Finance API", description="Unofficial Finance API pulling data from Yahoo (via yfinance) & MorningStar. Also send data for analysis to Gemini", version="3.3.1")
 
 logger = logging.getLogger('uvicorn.error')
 logger.setLevel(logging.DEBUG)
@@ -160,7 +160,7 @@ async def analyze_finances(
         system_instruction = gu.getFinancesPrompts(mode, summary, user_query)
         response = await gu.get_ai_response(system_instruction, model)
 
-        return {"analysis": response.text}
+        return {"analysis": response}
 
     except Exception as e:
         error_str = str(e).upper()
