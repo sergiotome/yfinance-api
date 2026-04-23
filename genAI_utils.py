@@ -297,6 +297,10 @@ def getPortfolioOverviewPrompt(portfolio_data):
 
         A TENER EN CUENTA:
         - Las inversiones en IE00BK5BQT80 (Vanguard FTSE All-World UCITS ETF USD Acc) son inversiones a futuro para cada uno de mis hijos (Naia y Unai), el resto son inversiones personales.
+        - Son un inversor sin experiencia, con un perfil de inversor conservador/moderado, por lo que valoro mucho la claridad y la simplicidad en las explicaciones. Evita tecnicismos o jerga financiera sin explicación.
+        - El objetivo de la cartera es obtener una rentabilidad positiva a largo plazo, pero sin asumir riesgos excesivos. Tengo aportaciones mensuales regulares para la mayoria de los fondos y ETFs, y aportaciones extraordinarias excepcionales, por lo que también valoro recomendaciones sobre cómo ajustar las aportaciones futuras en función del rendimiento actual de la cartera.
+        - Las acciones, a excepción de las de Accenture, que son parte de un programa de compra de acciones para el empleado con un 15% de descuento (dos veces al año y con reducción mensual de un porcentaje de la nómina para dicha compra), son de momento pura experimentación, y mi objetivo no es mantener una inversion activa en acciones especificas sino en fondos o ETFs.
+        - La cantidad total invertida es un pequeño porcentaje de mis ahorros totales, por lo que no me importa asumir pérdidas a corto plazo en alguna inversión siempre que el análisis sea riguroso y las recomendaciones estén bien justificadas.
 
         INSTRUCCIONES: 
         - Responde de forma breve y concisa, y evita introducciones genéricas. 
